@@ -1,0 +1,67 @@
+{
+	"name": "vscode-nes",
+	"displayName": "Sweep Next Edit",
+	"description": "Next Edit Autocomplete using Sweep Model",
+	"version": "0.1.0",
+	"publisher": "sweep",
+	"private": true,
+	"engines": {
+		"vscode": "^1.85.0"
+	},
+	"categories": [
+		"Other"
+	],
+	"activationEvents": [
+		"onStartupFinished"
+	],
+	"main": "./out/extension.js",
+	"enabledApiProposals": [
+		"inlineCompletionsAdditions"
+	],
+	"contributes": {
+		"commands": [
+			{
+				"command": "sweep.triggerNextEdit",
+				"title": "Sweep: Trigger Next Edit Suggestion"
+			},
+			{
+				"command": "sweep.setApiKey",
+				"title": "Sweep: Set API Key"
+			}
+		],
+		"configuration": {
+			"title": "Sweep Next Edit",
+			"properties": {
+				"sweep.apiKey": {
+					"type": "string",
+					"default": "",
+					"description": "API key for authentication"
+				},
+				"sweep.enabled": {
+					"type": "boolean",
+					"default": true,
+					"description": "Enable or disable Sweep Next Edit suggestions"
+				},
+				"sweep.maxContextFiles": {
+					"type": "number",
+					"default": 5,
+					"description": "Maximum number of recently viewed files to include as context"
+				}
+			}
+		}
+	},
+	"scripts": {
+		"build": "bun build src/extension.ts --outfile=out/extension.js --external=vscode --format=cjs --target=node",
+		"typecheck": "bun tsgo --noEmit",
+		"lint": "bun biome check .",
+		"fix": "bun biome check . --write"
+	},
+	"dependencies": {
+		"zod": "4.3.6"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.3.13",
+		"@types/vscode": "1.108.1",
+		"@typescript/native-preview": "7.0.0-dev.20260127.1"
+	}
+}
