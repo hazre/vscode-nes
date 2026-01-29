@@ -4,9 +4,13 @@
 	"description": "Next Edit Autocomplete using Sweep Model",
 	"version": "0.1.0",
 	"publisher": "sweep",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/sweepai/vscode-nes"
+	},
 	"private": true,
 	"engines": {
-		"vscode": "^1.85.0"
+		"vscode": "^1.108.0"
 	},
 	"categories": [
 		"Other"

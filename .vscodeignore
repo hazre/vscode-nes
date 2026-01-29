@@ -1,0 +1,12 @@
+.vscode/**
+.github/**
+.claude/**
+.git/**
+src/**
+node_modules/**
+*.vsix
+.gitignore
+biome.json
+bun.lock
+tsconfig.json
+**/*.map
