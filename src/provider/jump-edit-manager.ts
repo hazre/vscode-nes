@@ -189,13 +189,26 @@ export class JumpEditManager implements vscode.Disposable {
 		const removalRanges: vscode.Range[] = [];
 		const floatingBoxOptions: vscode.DecorationOptions[] = [];
 
-		for (let i = 0; i < originalLines.length; i++) {
+		const maxLines = Math.max(originalLines.length, newLines.length);
+		const diffs = Array.from({ length: maxLines }, (_, i) => {
 			const oldLine = originalLines[i] ?? "";
 			const newLine = newLines[i] ?? "";
-			const diff = this.getLineDiff(oldLine, newLine);
-			if (!diff) continue;
+			return {
+				oldLine,
+				newLine,
+				diff: this.getLineDiff(oldLine, newLine),
+			};
+		});
+
+		const hasAdditions = diffs.some((entry) => entry.diff?.newChanged.length);
+		const showPreview = hasAdditions;
+
+		for (let i = 0; i < originalLines.length; i++) {
+			const { oldLine, newLine, diff } = diffs[i] ?? {};
+			if (!diff || oldLine === undefined || newLine === undefined) continue;
 
 			const docLine = startLine + i;
+			if (docLine >= document.lineCount) break;
 
 			if (diff.oldChanged.length > 0) {
 				const removeStart = new vscode.Position(docLine, diff.prefixLen);
@@ -206,7 +219,7 @@ export class JumpEditManager implements vscode.Disposable {
 				removalRanges.push(new vscode.Range(removeStart, removeEnd));
 			}
 
-			if (diff.newChanged.length > 0 || diff.oldChanged.length > 0) {
+			if (showPreview && diff.newChanged.length > 0) {
 				const lineEnd = document.lineAt(docLine).range.end;
 				const highlightRanges: HighlightRange[] = [];
 
