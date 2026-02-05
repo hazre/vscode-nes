@@ -18,7 +18,8 @@ export class SweepStatusBar implements vscode.Disposable {
 			vscode.workspace.onDidChangeConfiguration((e) => {
 				if (
 					e.affectsConfiguration("sweep.enabled") ||
-					e.affectsConfiguration("sweep.privacyMode")
+					e.affectsConfiguration("sweep.privacyMode") ||
+					e.affectsConfiguration("sweep.autocompleteSnoozeUntil")
 				) {
 					this.updateStatusBar();
 				}
@@ -31,11 +32,16 @@ export class SweepStatusBar implements vscode.Disposable {
 	private updateStatusBar(): void {
 		const isEnabled = config.enabled;
 		const privacyMode = config.privacyMode;
+		const isSnoozed = config.isAutocompleteSnoozed();
 
 		this.statusBarItem.text = "$(sweep-icon) Sweep";
-		this.statusBarItem.tooltip = this.buildTooltip(isEnabled, privacyMode);
+		this.statusBarItem.tooltip = this.buildTooltip(
+			isEnabled,
+			privacyMode,
+			isSnoozed,
+		);
 
-		if (!isEnabled) {
+		if (!isEnabled || isSnoozed) {
 			this.statusBarItem.backgroundColor = new vscode.ThemeColor(
 				"statusBarItem.warningBackground",
 			);
@@ -44,10 +50,18 @@ export class SweepStatusBar implements vscode.Disposable {
 		}
 	}
 
-	private buildTooltip(isEnabled: boolean, privacyMode: boolean): string {
+	private buildTooltip(
+		isEnabled: boolean,
+		privacyMode: boolean,
+		isSnoozed: boolean,
+	): string {
 		const status = isEnabled ? "Enabled" : "Disabled";
 		const privacy = privacyMode ? "On" : "Off";
-		return `Sweep Next Edit\nStatus: ${status}\nPrivacy Mode: ${privacy}\n\nClick to open menu`;
+		const snoozeUntil = config.autocompleteSnoozeUntil;
+		const snoozeLine = isSnoozed
+			? `Snoozed Until: ${formatSnoozeTime(snoozeUntil)}`
+			: "Snoozed: Off";
+		return `Sweep Next Edit\nStatus: ${status}\nPrivacy Mode: ${privacy}\n${snoozeLine}\n\nClick to open menu`;
 	}
 
 	dispose(): void {
@@ -67,6 +81,7 @@ export function registerStatusBarCommands(
 		vscode.commands.registerCommand("sweep.showMenu", async () => {
 			const isEnabled = config.enabled;
 			const privacyMode = config.privacyMode;
+			const isSnoozed = config.isAutocompleteSnoozed();
 
 			interface MenuItem extends vscode.QuickPickItem {
 				action: string;
@@ -89,6 +104,15 @@ export function registerStatusBarCommands(
 					label: "$(key) Set API Key",
 					description: "Configure your Sweep API key",
 					action: "setApiKey",
+				},
+				{
+					label: isSnoozed
+						? "$(play-circle) Resume Autocomplete"
+						: "$(clock) Snooze Autocomplete",
+					description: isSnoozed
+						? "Resume suggestions immediately"
+						: "Pause suggestions temporarily",
+					action: isSnoozed ? "resumeSnooze" : "snooze",
 				},
 				{
 					label: "$(link-external) Open Sweep Dashboard",
@@ -117,6 +141,12 @@ export function registerStatusBarCommands(
 						await vscode.env.openExternal(
 							vscode.Uri.parse("https://app.sweep.dev"),
 						);
+						break;
+					case "snooze":
+						await handleSnooze();
+						break;
+					case "resumeSnooze":
+						await handleResumeSnooze();
 						break;
 				}
 			}
@@ -162,4 +192,45 @@ export function registerStatusBarCommands(
 	);
 
 	return disposables;
+}
+
+function formatSnoozeTime(timestamp: number): string {
+	return new Date(timestamp).toLocaleString();
+}
+
+async function handleSnooze(): Promise<void> {
+	const options: Array<{ label: string; minutes: number }> = [
+		{ label: "15 minutes", minutes: 15 },
+		{ label: "30 minutes", minutes: 30 },
+		{ label: "1 hour", minutes: 60 },
+		{ label: "4 hours", minutes: 240 },
+	];
+
+	const selection = await vscode.window.showQuickPick(
+		options.map((option) => ({
+			label: option.label,
+			description: `Pause autocomplete for ${option.label}`,
+		})),
+		{ title: "Snooze Sweep Autocomplete", placeHolder: "Choose duration" },
+	);
+
+	if (!selection) return;
+
+	const selected = options.find((option) => option.label === selection.label);
+	if (!selected) return;
+
+	const until = Date.now() + selected.minutes * 60 * 1000;
+	await config.setAutocompleteSnoozeUntil(
+		until,
+		vscode.ConfigurationTarget.Global,
+	);
+	await vscode.commands.executeCommand("editor.action.inlineSuggest.hide");
+	vscode.window.showInformationMessage(
+		`Sweep autocomplete snoozed until ${formatSnoozeTime(until)}.`,
+	);
+}
+
+async function handleResumeSnooze(): Promise<void> {
+	await config.setAutocompleteSnoozeUntil(0, vscode.ConfigurationTarget.Global);
+	vscode.window.showInformationMessage("Sweep autocomplete resumed.");
 }
