@@ -15,6 +15,10 @@ import { isFileTooLarge } from "~/utils/text.ts";
 const API_KEY_PROMPT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const INLINE_REQUEST_DEBOUNCE_MS = 300;
 const MAX_FILE_CHUNK_LINES = 60;
+const BULK_CHANGE_LOOKBACK_MS = 1500;
+const BULK_CHANGE_CHAR_THRESHOLD = 200;
+const BULK_CHANGE_LINE_THRESHOLD = 8;
+const SELECTION_LOOKBACK_MS = 5000;
 
 export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 	private tracker: DocumentTracker;
@@ -65,6 +69,12 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 
 		if (!this.api.apiKey) {
 			this.promptForApiKey();
+			return undefined;
+		}
+
+		const suppressionReason = await this.getSuppressionReason(document);
+		if (suppressionReason) {
+			console.log("[Sweep] Suppressing inline edit:", suppressionReason);
 			return undefined;
 		}
 
@@ -129,6 +139,15 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 					requestCharacter: requestSnapshot.position.character,
 					contentMatches: requestSnapshot.content === document.getText(),
 				});
+				return undefined;
+			}
+
+			const renderSuppressionReason = await this.getSuppressionReason(document);
+			if (renderSuppressionReason) {
+				console.log(
+					"[Sweep] Suppressing inline edit render:",
+					renderSuppressionReason,
+				);
 				return undefined;
 			}
 
@@ -214,6 +233,77 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 		console.log("[Sweep] Cancelling in-flight inline edit request:", reason);
 		this.inFlightRequest.controller.abort();
 		this.inFlightRequest = null;
+	}
+
+	private async getSuppressionReason(
+		document: vscode.TextDocument,
+	): Promise<string | null> {
+		const activeEditor = vscode.window.activeTextEditor;
+		if (!activeEditor) return "no active editor";
+		if (activeEditor.document.uri.toString() !== document.uri.toString()) {
+			return "inactive document";
+		}
+		if (!vscode.window.state.focused) return "window not focused";
+
+		if (
+			this.hasMultiLineSelection(activeEditor, document) ||
+			this.tracker.wasRecentMultiLineSelection(
+				document.uri.toString(),
+				SELECTION_LOOKBACK_MS,
+			)
+		) {
+			return "multi-line selection";
+		}
+
+		const editorTextFocus =
+			await this.getContextKeyValue<boolean>("editorTextFocus");
+		if (editorTextFocus === false) return "editor not focused";
+
+		const isWritable = vscode.workspace.fs.isWritableFileSystem(
+			document.uri.scheme,
+		);
+		if (isWritable === false) return "read-only document";
+
+		const inSnippetMode =
+			await this.getContextKeyValue<boolean>("inSnippetMode");
+		if (inSnippetMode) return "snippet/template mode";
+
+		const uri = document.uri.toString();
+		if (
+			this.tracker.wasRecentBulkChange(uri, {
+				windowMs: BULK_CHANGE_LOOKBACK_MS,
+				charThreshold: BULK_CHANGE_CHAR_THRESHOLD,
+				lineThreshold: BULK_CHANGE_LINE_THRESHOLD,
+			})
+		) {
+			return "recent bulk edit";
+		}
+
+		return null;
+	}
+
+	private async getContextKeyValue<T>(key: string): Promise<T | undefined> {
+		try {
+			return (await vscode.commands.executeCommand(
+				"getContextKeyValue",
+				key,
+			)) as T | undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
+	private hasMultiLineSelection(
+		editor: vscode.TextEditor,
+		document: vscode.TextDocument,
+	): boolean {
+		for (const selection of editor.selections) {
+			if (selection.isEmpty) continue;
+			if (selection.start.line !== selection.end.line) return true;
+			const selectedText = document.getText(selection);
+			if (selectedText.includes("\n")) return true;
+		}
+		return false;
 	}
 
 	private async waitForDebounce(

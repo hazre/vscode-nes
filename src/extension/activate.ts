@@ -122,6 +122,10 @@ export function activate(context: vscode.ExtensionContext) {
 	const selectionChangeListener = vscode.window.onDidChangeTextEditorSelection(
 		(event) => {
 			if (event.textEditor === vscode.window.activeTextEditor) {
+				tracker.trackSelectionChange(
+					event.textEditor.document,
+					event.selections,
+				);
 				for (const selection of event.selections) {
 					tracker.trackCursorMovement(
 						event.textEditor.document,
