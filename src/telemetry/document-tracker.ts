@@ -16,6 +16,12 @@ interface CursorSnapshot {
 	timestamp: number;
 }
 
+interface ChangeSummary {
+	timestamp: number;
+	totalChars: number;
+	totalLines: number;
+}
+
 export interface EditRecord {
 	filepath: string;
 	diff: string;
@@ -35,6 +41,8 @@ export class DocumentTracker implements vscode.Disposable {
 	private userActions: UserAction[] = [];
 	private originalContents = new Map<string, string>();
 	private cursorPositions = new Map<string, CursorSnapshot>();
+	private lastChangeSummaries = new Map<string, ChangeSummary>();
+	private lastMultiLineSelections = new Map<string, number>();
 	private maxRecentFiles = 10;
 	private maxEditHistory = 10;
 	private maxUserActions = 50;
@@ -75,6 +83,8 @@ export class DocumentTracker implements vscode.Disposable {
 		const filepath = toUnixPath(event.document.fileName);
 		const uri = event.document.uri.toString();
 		const now = Date.now();
+		let totalChars = 0;
+		let totalLines = 0;
 
 		for (const change of event.contentChanges) {
 			if (!change.text && change.rangeLength === 0) continue;
@@ -106,6 +116,19 @@ export class DocumentTracker implements vscode.Disposable {
 				timestamp: now,
 			});
 			this.pruneUserActions();
+
+			totalChars += change.text.length + change.rangeLength;
+			const insertedLines = Math.max(0, change.text.split("\n").length - 1);
+			const removedLines = change.range.end.line - change.range.start.line;
+			totalLines += insertedLines + removedLines;
+		}
+
+		if (totalChars > 0 || totalLines > 0) {
+			this.lastChangeSummaries.set(uri, {
+				timestamp: now,
+				totalChars,
+				totalLines,
+			});
 		}
 	}
 
@@ -131,6 +154,24 @@ export class DocumentTracker implements vscode.Disposable {
 			timestamp,
 		});
 		this.pruneUserActions();
+	}
+
+	trackSelectionChange(
+		document: vscode.TextDocument,
+		selections: readonly vscode.Selection[],
+	): void {
+		let hasMultiLine = false;
+		for (const selection of selections) {
+			if (selection.isEmpty) continue;
+			if (selection.start.line !== selection.end.line) {
+				hasMultiLine = true;
+				break;
+			}
+		}
+
+		if (hasMultiLine) {
+			this.lastMultiLineSelections.set(document.uri.toString(), Date.now());
+		}
 	}
 
 	private getActionType(
@@ -174,6 +215,29 @@ export class DocumentTracker implements vscode.Disposable {
 
 	getOriginalContent(uri: string): string | undefined {
 		return this.originalContents.get(uri);
+	}
+
+	wasRecentBulkChange(
+		uri: string,
+		options: {
+			windowMs: number;
+			charThreshold: number;
+			lineThreshold: number;
+		},
+	): boolean {
+		const summary = this.lastChangeSummaries.get(uri);
+		if (!summary) return false;
+		if (Date.now() - summary.timestamp > options.windowMs) return false;
+		return (
+			summary.totalChars >= options.charThreshold ||
+			summary.totalLines >= options.lineThreshold
+		);
+	}
+
+	wasRecentMultiLineSelection(uri: string, windowMs: number): boolean {
+		const timestamp = this.lastMultiLineSelections.get(uri);
+		if (!timestamp) return false;
+		return Date.now() - timestamp <= windowMs;
 	}
 
 	resetOriginalContent(uri: string, content: string): void {
@@ -250,5 +314,7 @@ export class DocumentTracker implements vscode.Disposable {
 		this.userActions = [];
 		this.originalContents.clear();
 		this.cursorPositions.clear();
+		this.lastChangeSummaries.clear();
+		this.lastMultiLineSelections.clear();
 	}
 }
