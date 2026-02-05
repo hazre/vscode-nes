@@ -59,6 +59,7 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 		this.cancelInFlightRequest("superseded by new request");
 
 		if (!config.enabled) return undefined;
+		if (config.isAutocompleteSnoozed()) return undefined;
 
 		if (!this.api.apiKey) {
 			this.promptForApiKey();
@@ -66,6 +67,10 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 		}
 
 		const uri = document.uri.toString();
+		const filePath = document.uri.fsPath;
+		if (filePath && config.shouldExcludeFromAutocomplete(filePath)) {
+			return undefined;
+		}
 		const currentContent = document.getText();
 		const requestSnapshot = {
 			uri,

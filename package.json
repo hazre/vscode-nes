@@ -99,6 +99,27 @@
 					"type": "number",
 					"default": 5,
 					"description": "Maximum number of recently viewed files to include as context"
+				},
+				"sweep.autocompleteExclusionPatterns": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					},
+					"default": [
+						"**/.env*",
+						"**/*.pem",
+						"**/*.key",
+						"**/*.cert",
+						"**/*.crt",
+						"**/.dev.vars",
+						"**/secrets.yml"
+					],
+					"description": "File name suffixes or globs to exclude from autocomplete"
+				},
+				"sweep.autocompleteSnoozeUntil": {
+					"type": "number",
+					"default": 0,
+					"description": "Unix timestamp (ms) until which autocomplete is snoozed (0 disables snooze)"
 				}
 			}
 		}
