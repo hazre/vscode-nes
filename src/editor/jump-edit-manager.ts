@@ -167,15 +167,11 @@ export class JumpEditManager implements vscode.Disposable {
 			editEndPos,
 			originCursorLine: editor.selection.active.line,
 			metricsPayload: buildMetricsPayload(document, result, {
-				suggestionType: "POPUP",
+				suggestionType: "JUMP_TO_EDIT",
 			}),
 		};
 
-		this.metricsTracker.trackShown(this.pendingJumpEdit.metricsPayload, {
-			uri: document.uri,
-			startLine: editStartPos.line,
-			endLine: editEndPos.line,
-		});
+		this.metricsTracker.trackShown(this.pendingJumpEdit.metricsPayload);
 		this.applyDecorations(editor, document);
 		vscode.commands.executeCommand("setContext", "sweep.hasJumpEdit", true);
 	}

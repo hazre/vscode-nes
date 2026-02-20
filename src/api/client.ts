@@ -1,14 +1,8 @@
 import * as http from "node:http";
-import * as https from "node:https";
 import * as os from "node:os";
-import * as zlib from "node:zlib";
 import * as vscode from "vscode";
 import type { ZodType } from "zod";
-import { config } from "~/core/config.ts";
-import {
-	DEFAULT_API_ENDPOINT,
-	DEFAULT_METRICS_ENDPOINT,
-} from "~/core/constants.ts";
+import type { LocalAutocompleteServer } from "~/services/local-server.ts";
 import { toUnixPath } from "~/utils/path.ts";
 import {
 	isFileTooLarge,
@@ -16,13 +10,16 @@ import {
 	utf8ByteOffsetToUtf16Offset,
 } from "~/utils/text.ts";
 import {
-	type AutocompleteMetricsRequest,
-	AutocompleteMetricsRequestSchema,
+	fuseAndDedupRetrievalSnippets,
+	truncateRetrievalChunk,
+} from "./retrieval-chunks.ts";
+import {
 	type AutocompleteRequest,
 	AutocompleteRequestSchema,
 	type AutocompleteResponse,
 	AutocompleteResponseSchema,
 	type AutocompleteResult,
+	type EditorDiagnostic,
 	type FileChunk,
 	type RecentBuffer,
 	type RecentChange,
@@ -39,27 +36,26 @@ export interface AutocompleteInput {
 	userActions: UserAction[];
 }
 
-export class ApiClient {
-	private apiUrl: string;
-	private metricsUrl: string;
+const MAX_RETRIEVAL_CHUNKS = 16;
+const MAX_DEFINITION_CHUNKS = 6;
+const MAX_USAGE_CHUNKS = 6;
+const MAX_RETRIEVAL_CHUNK_LINES = 200;
+const RETRIEVAL_CONTEXT_LINES_ABOVE = 9;
+const RETRIEVAL_CONTEXT_LINES_BELOW = 9;
+const MAX_CLIPBOARD_LINES = 20;
+const MAX_DIAGNOSTICS = 50;
 
-	constructor(
-		apiUrl: string = DEFAULT_API_ENDPOINT,
-		metricsUrl: string = DEFAULT_METRICS_ENDPOINT,
-	) {
-		this.apiUrl = apiUrl;
-		this.metricsUrl = metricsUrl;
+export class ApiClient {
+	private localServer: LocalAutocompleteServer;
+
+	constructor(localServer: LocalAutocompleteServer) {
+		this.localServer = localServer;
 	}
 
 	async getAutocomplete(
 		input: AutocompleteInput,
 		signal?: AbortSignal,
-	): Promise<AutocompleteResult | null> {
-		const apiKey = this.apiKey;
-		if (!apiKey) {
-			return null;
-		}
-
+	): Promise<AutocompleteResult[] | null> {
 		const documentText = input.document.getText();
 		if (isFileTooLarge(documentText) || isFileTooLarge(input.originalContent)) {
 			console.log("[Sweep] Skipping autocomplete request: file too large", {
@@ -69,7 +65,7 @@ export class ApiClient {
 			return null;
 		}
 
-		const requestData = this.buildRequest(input);
+		const requestData = await this.buildRequest(input);
 
 		const parsedRequest = AutocompleteRequestSchema.safeParse(requestData);
 		if (!parsedRequest.success) {
@@ -80,64 +76,71 @@ export class ApiClient {
 			return null;
 		}
 
-		const compressed = await this.compress(JSON.stringify(parsedRequest.data));
 		let response: AutocompleteResponse;
 		try {
+			await this.localServer.ensureServerRunning();
+		} catch (error) {
+			console.error("[Sweep] Failed to start local server:", error);
+			return null;
+		}
+
+		const localUrl = `${this.localServer.getServerUrl()}/backend/next_edit_autocomplete`;
+		try {
 			response = await this.sendRequest(
-				compressed,
-				apiKey,
+				JSON.stringify(parsedRequest.data),
+				localUrl,
 				AutocompleteResponseSchema,
 				signal,
 			);
+			this.localServer.reportSuccess();
 		} catch (error) {
 			if ((error as Error).name === "AbortError") {
 				return null;
 			}
-			console.error("[Sweep] API request failed:", error);
+			console.error("[Sweep] Local API request failed:", error);
+			this.localServer.reportFailure();
 			return null;
 		}
 
-		const startIndex = requestData.use_bytes
-			? utf8ByteOffsetToUtf16Offset(documentText, response.start_index)
-			: response.start_index;
-		const endIndex = requestData.use_bytes
-			? utf8ByteOffsetToUtf16Offset(documentText, response.end_index)
-			: response.end_index;
+		const decodeOffset = requestData.use_bytes
+			? (index: number) => utf8ByteOffsetToUtf16Offset(documentText, index)
+			: (index: number) => index;
 
-		return {
-			id: response.autocomplete_id,
-			startIndex,
-			endIndex,
-			completion: response.completion,
-			confidence: response.confidence,
-		};
-	}
+		const completions =
+			response.completions && response.completions.length > 0
+				? response.completions
+				: [
+						{
+							autocomplete_id: response.autocomplete_id,
+							start_index: response.start_index,
+							end_index: response.end_index,
+							completion: response.completion,
+							confidence: response.confidence,
+						},
+					];
 
-	async trackAutocompleteMetrics(
-		request: AutocompleteMetricsRequest,
-	): Promise<void> {
-		const apiKey = this.apiKey;
-		if (!apiKey) {
-			return;
+		const results = completions
+			.map((completion): AutocompleteResult => {
+				return {
+					id: completion.autocomplete_id,
+					startIndex: decodeOffset(completion.start_index),
+					endIndex: decodeOffset(completion.end_index),
+					completion: completion.completion,
+					confidence: completion.confidence,
+				};
+			})
+			.filter((result) => result.completion.length > 0);
+
+		if (results.length === 0) {
+			return null;
 		}
 
-		const parsedRequest = AutocompleteMetricsRequestSchema.safeParse(request);
-		if (!parsedRequest.success) {
-			console.error(
-				"[Sweep] Invalid metrics data:",
-				parsedRequest.error.message,
-			);
-			return;
-		}
-
-		await this.sendMetricsRequest(JSON.stringify(parsedRequest.data), apiKey);
+		return results;
 	}
 
-	get apiKey(): string | null {
-		return config.apiKey;
-	}
-
-	private buildRequest(input: AutocompleteInput): AutocompleteRequest {
+	private async buildRequest(
+		input: AutocompleteInput,
+	): Promise<AutocompleteRequest> {
 		const {
 			document,
 			position,
@@ -151,7 +154,16 @@ export class ApiClient {
 		const filePath = toUnixPath(document.uri.fsPath) || "untitled";
 		const recentChangesText = this.formatRecentChanges(recentChanges);
 		const fileChunks = this.buildFileChunks(recentBuffers);
-		const retrievalChunks = this.buildDiagnosticsChunk(filePath, diagnostics);
+		const retrievalChunks = await this.buildRetrievalChunks(
+			document,
+			position,
+			filePath,
+			diagnostics,
+		);
+		const editorDiagnostics = this.buildEditorDiagnostics(
+			document,
+			diagnostics,
+		);
 
 		return {
 			debug_info: this.getDebugInfo(),
@@ -162,12 +174,12 @@ export class ApiClient {
 			cursor_position: utf8ByteOffsetAt(document, position),
 			recent_changes: recentChangesText,
 			changes_above_cursor: true,
-			multiple_suggestions: false,
+			multiple_suggestions: true,
 			file_chunks: fileChunks,
 			retrieval_chunks: retrievalChunks,
+			editor_diagnostics: editorDiagnostics,
 			recent_user_actions: userActions,
 			use_bytes: true,
-			privacy_mode_enabled: config.privacyMode,
 		};
 	}
 
@@ -219,14 +231,40 @@ export class ApiClient {
 			});
 	}
 
-	private buildDiagnosticsChunk(
+	private async buildRetrievalChunks(
+		document: vscode.TextDocument,
+		position: vscode.Position,
+		currentFilePath: string,
+		diagnostics: vscode.Diagnostic[],
+	): Promise<FileChunk[]> {
+		const [definitionChunks, usageChunks, clipboardChunks] = await Promise.all([
+			this.buildDefinitionChunks(document, position),
+			this.buildUsageChunks(document, position),
+			this.buildClipboardChunks(),
+		]);
+
+		const chunks = [
+			...this.buildDiagnosticsTextChunk(currentFilePath, diagnostics),
+			...clipboardChunks,
+			...usageChunks,
+			...definitionChunks,
+		]
+			.filter((chunk) => chunk.file_path !== currentFilePath)
+			.map((chunk) => truncateRetrievalChunk(chunk, MAX_RETRIEVAL_CHUNK_LINES))
+			.filter((chunk) => chunk.content.trim().length > 0);
+
+		return fuseAndDedupRetrievalSnippets(chunks).slice(-MAX_RETRIEVAL_CHUNKS);
+	}
+
+	private buildDiagnosticsTextChunk(
 		filePath: string,
 		diagnostics: vscode.Diagnostic[],
 	): FileChunk[] {
 		if (diagnostics.length === 0) return [];
 
 		let content = "";
-		for (const d of diagnostics) {
+		const limitedDiagnostics = diagnostics.slice(0, MAX_DIAGNOSTICS);
+		for (const d of limitedDiagnostics) {
 			const severity = this.formatSeverity(d.severity);
 			const line = d.range.start.line + 1;
 			const col = d.range.start.character + 1;
@@ -237,10 +275,157 @@ export class ApiClient {
 			{
 				file_path: "diagnostics",
 				start_line: 1,
-				end_line: diagnostics.length,
+				end_line: limitedDiagnostics.length,
 				content,
 			},
 		];
+	}
+
+	private buildEditorDiagnostics(
+		document: vscode.TextDocument,
+		diagnostics: vscode.Diagnostic[],
+	): EditorDiagnostic[] {
+		return diagnostics.slice(0, MAX_DIAGNOSTICS).map((diagnostic) => ({
+			line: diagnostic.range.start.line + 1,
+			start_offset: document.offsetAt(diagnostic.range.start),
+			end_offset: document.offsetAt(diagnostic.range.end),
+			severity: this.formatSeverity(diagnostic.severity),
+			message: diagnostic.message,
+			timestamp: Date.now(),
+		}));
+	}
+
+	private async buildClipboardChunks(): Promise<FileChunk[]> {
+		try {
+			const clipboard = (await vscode.env.clipboard.readText()).trim();
+			if (!clipboard) return [];
+
+			const lines = clipboard.split(/\r?\n/).slice(0, MAX_CLIPBOARD_LINES);
+			const content = lines.join("\n").trim();
+			if (!content) return [];
+
+			return [
+				{
+					file_path: "clipboard.txt",
+					start_line: 1,
+					end_line: lines.length,
+					content,
+					timestamp: Date.now(),
+				},
+			];
+		} catch {
+			return [];
+		}
+	}
+
+	private async buildDefinitionChunks(
+		document: vscode.TextDocument,
+		position: vscode.Position,
+	): Promise<FileChunk[]> {
+		try {
+			const results =
+				(await vscode.commands.executeCommand<
+					Array<vscode.Location | vscode.LocationLink> | undefined
+				>("vscode.executeDefinitionProvider", document.uri, position)) ?? [];
+			const locations = results
+				.map((result) => this.normalizeLocation(result))
+				.filter((location): location is vscode.Location => location !== null);
+			return this.buildLocationChunks(locations, MAX_DEFINITION_CHUNKS);
+		} catch {
+			return [];
+		}
+	}
+
+	private async buildUsageChunks(
+		document: vscode.TextDocument,
+		position: vscode.Position,
+	): Promise<FileChunk[]> {
+		try {
+			const results =
+				(await vscode.commands.executeCommand<vscode.Location[] | undefined>(
+					"vscode.executeReferenceProvider",
+					document.uri,
+					position,
+				)) ?? [];
+			return this.buildLocationChunks(results, MAX_USAGE_CHUNKS);
+		} catch {
+			return [];
+		}
+	}
+
+	private normalizeLocation(
+		location: vscode.Location | vscode.LocationLink,
+	): vscode.Location | null {
+		if ("uri" in location && "range" in location) {
+			return new vscode.Location(location.uri, location.range);
+		}
+		if ("targetUri" in location && "targetRange" in location) {
+			return new vscode.Location(location.targetUri, location.targetRange);
+		}
+		return null;
+	}
+
+	private async buildLocationChunks(
+		locations: readonly vscode.Location[],
+		maxChunks: number,
+	): Promise<FileChunk[]> {
+		const seen = new Set<string>();
+		const chunks: FileChunk[] = [];
+
+		for (const location of locations) {
+			if (chunks.length >= maxChunks) break;
+			const key = `${location.uri.toString()}:${location.range.start.line}:${location.range.end.line}`;
+			if (seen.has(key)) continue;
+			seen.add(key);
+
+			const chunk = await this.buildChunkFromLocation(location);
+			if (!chunk) continue;
+			chunks.push(chunk);
+		}
+
+		return chunks;
+	}
+
+	private async buildChunkFromLocation(
+		location: vscode.Location,
+	): Promise<FileChunk | null> {
+		let targetDocument: vscode.TextDocument;
+		try {
+			targetDocument = await vscode.workspace.openTextDocument(location.uri);
+		} catch {
+			return null;
+		}
+
+		const totalLines = targetDocument.lineCount;
+		if (totalLines === 0) return null;
+
+		const startLine = Math.max(
+			0,
+			location.range.start.line - RETRIEVAL_CONTEXT_LINES_ABOVE,
+		);
+		const endLine = Math.min(
+			totalLines - 1,
+			location.range.end.line + RETRIEVAL_CONTEXT_LINES_BELOW,
+		);
+		const endPosition =
+			endLine + 1 < totalLines
+				? new vscode.Position(endLine + 1, 0)
+				: targetDocument.lineAt(endLine).range.end;
+		const range = new vscode.Range(
+			new vscode.Position(startLine, 0),
+			endPosition,
+		);
+		const content = targetDocument.getText(range).trim();
+		if (!content) return null;
+
+		return {
+			file_path:
+				toUnixPath(targetDocument.uri.fsPath) || targetDocument.uri.toString(),
+			start_line: startLine + 1,
+			end_line: endLine + 1,
+			content,
+			timestamp: Date.now(),
+		};
 	}
 
 	private formatSeverity(
@@ -273,24 +458,9 @@ export class ApiClient {
 		);
 	}
 
-	private compress(data: string): Promise<Buffer> {
-		return new Promise((resolve, reject) => {
-			zlib.brotliCompress(
-				Buffer.from(data, "utf-8"),
-				{
-					params: {
-						[zlib.constants.BROTLI_PARAM_QUALITY]: 11,
-						[zlib.constants.BROTLI_PARAM_LGWIN]: 22,
-					},
-				},
-				(error, result) => (error ? reject(error) : resolve(result)),
-			);
-		});
-	}
-
 	private sendRequest<T>(
-		body: Buffer,
-		apiKey: string,
+		body: string,
+		url: string,
 		schema: ZodType<T>,
 		signal?: AbortSignal,
 	): Promise<T> {
@@ -303,25 +473,19 @@ export class ApiClient {
 				fn();
 			};
 
-			const url = new URL(this.apiUrl);
-			const isHttps = url.protocol === "https:";
-			const defaultPort = isHttps ? 443 : 80;
-
+			const parsedUrl = new URL(url);
 			const options: http.RequestOptions = {
-				hostname: url.hostname,
-				port: url.port || defaultPort,
-				path: `${url.pathname}${url.search}`,
+				hostname: parsedUrl.hostname,
+				port: parsedUrl.port || 80,
+				path: `${parsedUrl.pathname}${parsedUrl.search}`,
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",
-					Authorization: `Bearer ${apiKey}`,
-					"Content-Encoding": "br",
-					"Content-Length": body.length,
+					"Content-Length": Buffer.byteLength(body),
 				},
 			};
 
-			const transport = isHttps ? https : http;
-			const req = transport.request(options, (res) => {
+			const req = http.request(options, (res) => {
 				let data = "";
 				res.on("data", (chunk) => {
 					data += chunk.toString();
@@ -329,11 +493,11 @@ export class ApiClient {
 				res.on("end", () => {
 					if (res.statusCode !== 200) {
 						console.error(
-							`[Sweep] API request failed with status ${res.statusCode}: ${data}`,
+							`[Sweep] Local request failed with status ${res.statusCode}: ${data}`,
 						);
 						finish(() =>
 							reject(
-								new Error(`API request failed with status ${res.statusCode}`),
+								new Error(`Local request failed with status ${res.statusCode}`),
 							),
 						);
 						return;
@@ -344,7 +508,7 @@ export class ApiClient {
 						if (!parsed.success) {
 							finish(() =>
 								reject(
-									new Error(`Invalid API response: ${parsed.error.message}`),
+									new Error(`Invalid local response: ${parsed.error.message}`),
 								),
 							);
 							return;
@@ -352,14 +516,16 @@ export class ApiClient {
 						finish(() => resolve(parsed.data));
 					} catch {
 						finish(() =>
-							reject(new Error("Failed to parse API response JSON")),
+							reject(new Error("Failed to parse local response JSON")),
 						);
 					}
 				});
 			});
 
 			const onError = (error: Error) => {
-				finish(() => reject(new Error(`API request error: ${error.message}`)));
+				finish(() =>
+					reject(new Error(`Local request error: ${error.message}`)),
+				);
 			};
 
 			const onAbort = () => {
@@ -386,58 +552,6 @@ export class ApiClient {
 				signal.addEventListener("abort", onAbort);
 			}
 
-			req.write(body);
-			req.end();
-		});
-	}
-
-	private sendMetricsRequest(body: string, apiKey: string): Promise<void> {
-		return new Promise((resolve, reject) => {
-			const url = new URL(this.metricsUrl);
-			const isHttps = url.protocol === "https:";
-			const defaultPort = isHttps ? 443 : 80;
-
-			const options: http.RequestOptions = {
-				hostname: url.hostname,
-				port: url.port || defaultPort,
-				path: url.pathname,
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					Authorization: `Bearer ${apiKey}`,
-					"Content-Length": Buffer.byteLength(body),
-				},
-			};
-
-			const transport = isHttps ? https : http;
-			const req = transport.request(options, (res) => {
-				let data = "";
-				res.on("data", (chunk) => {
-					data += chunk.toString();
-				});
-				res.on("end", () => {
-					if (
-						!res.statusCode ||
-						res.statusCode < 200 ||
-						res.statusCode >= 300
-					) {
-						console.error(
-							`[Sweep] Metrics request failed with status ${res.statusCode}: ${data}`,
-						);
-						reject(
-							new Error(
-								`Metrics request failed with status ${res.statusCode}: ${data}`,
-							),
-						);
-						return;
-					}
-					resolve();
-				});
-			});
-
-			req.on("error", (error) =>
-				reject(new Error(`Metrics request error: ${error.message}`)),
-			);
 			req.write(body);
 			req.end();
 		});

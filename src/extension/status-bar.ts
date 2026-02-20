@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 
 import { config } from "~/core/config";
+import type { LocalAutocompleteServer } from "~/services/local-server.ts";
 
 export class SweepStatusBar implements vscode.Disposable {
 	private statusBarItem: vscode.StatusBarItem;
@@ -18,7 +19,6 @@ export class SweepStatusBar implements vscode.Disposable {
 			vscode.workspace.onDidChangeConfiguration((e) => {
 				if (
 					e.affectsConfiguration("sweep.enabled") ||
-					e.affectsConfiguration("sweep.privacyMode") ||
 					e.affectsConfiguration("sweep.autocompleteSnoozeUntil")
 				) {
 					this.updateStatusBar();
@@ -31,15 +31,10 @@ export class SweepStatusBar implements vscode.Disposable {
 
 	private updateStatusBar(): void {
 		const isEnabled = config.enabled;
-		const privacyMode = config.privacyMode;
 		const isSnoozed = config.isAutocompleteSnoozed();
 
 		this.statusBarItem.text = "$(sweep-icon) Sweep";
-		this.statusBarItem.tooltip = this.buildTooltip(
-			isEnabled,
-			privacyMode,
-			isSnoozed,
-		);
+		this.statusBarItem.tooltip = this.buildTooltip(isEnabled, isSnoozed);
 
 		if (!isEnabled || isSnoozed) {
 			this.statusBarItem.backgroundColor = new vscode.ThemeColor(
@@ -50,18 +45,13 @@ export class SweepStatusBar implements vscode.Disposable {
 		}
 	}
 
-	private buildTooltip(
-		isEnabled: boolean,
-		privacyMode: boolean,
-		isSnoozed: boolean,
-	): string {
+	private buildTooltip(isEnabled: boolean, isSnoozed: boolean): string {
 		const status = isEnabled ? "Enabled" : "Disabled";
-		const privacy = privacyMode ? "On" : "Off";
 		const snoozeUntil = config.autocompleteSnoozeUntil;
 		const snoozeLine = isSnoozed
 			? `Snoozed Until: ${formatSnoozeTime(snoozeUntil)}`
 			: "Snoozed: Off";
-		return `Sweep Next Edit\nStatus: ${status}\nPrivacy Mode: ${privacy}\n${snoozeLine}\n\nClick to open menu`;
+		return `Sweep Next Edit\nStatus: ${status}\n${snoozeLine}\n\nClick to open menu`;
 	}
 
 	dispose(): void {
@@ -74,13 +64,13 @@ export class SweepStatusBar implements vscode.Disposable {
 
 export function registerStatusBarCommands(
 	_context: vscode.ExtensionContext,
+	localServer?: LocalAutocompleteServer,
 ): vscode.Disposable[] {
 	const disposables: vscode.Disposable[] = [];
 
 	disposables.push(
 		vscode.commands.registerCommand("sweep.showMenu", async () => {
 			const isEnabled = config.enabled;
-			const privacyMode = config.privacyMode;
 			const isSnoozed = config.isAutocompleteSnoozed();
 
 			interface MenuItem extends vscode.QuickPickItem {
@@ -94,18 +84,6 @@ export function registerStatusBarCommands(
 					action: "toggleEnabled",
 				},
 				{
-					label: `$(${privacyMode ? "check" : "circle-outline"}) Privacy Mode`,
-					description: privacyMode
-						? "Completions not used for training"
-						: "Completions may be used for training",
-					action: "togglePrivacy",
-				},
-				{
-					label: "$(key) Set API Key",
-					description: "Configure your Sweep API key",
-					action: "setApiKey",
-				},
-				{
 					label: isSnoozed
 						? "$(play-circle) Resume Autocomplete"
 						: "$(clock) Snooze Autocomplete",
@@ -115,9 +93,9 @@ export function registerStatusBarCommands(
 					action: isSnoozed ? "resumeSnooze" : "snooze",
 				},
 				{
-					label: "$(link-external) Open Sweep Dashboard",
-					description: "https://app.sweep.dev",
-					action: "openDashboard",
+					label: "$(server) Start Local Server",
+					description: "Manually start the local autocomplete server",
+					action: "startLocalServer",
 				},
 			];
 
@@ -131,22 +109,29 @@ export function registerStatusBarCommands(
 					case "toggleEnabled":
 						await vscode.commands.executeCommand("sweep.toggleEnabled");
 						break;
-					case "togglePrivacy":
-						await vscode.commands.executeCommand("sweep.togglePrivacyMode");
-						break;
-					case "setApiKey":
-						await vscode.commands.executeCommand("sweep.setApiKey");
-						break;
-					case "openDashboard":
-						await vscode.env.openExternal(
-							vscode.Uri.parse("https://app.sweep.dev"),
-						);
-						break;
 					case "snooze":
 						await handleSnooze();
 						break;
 					case "resumeSnooze":
 						await handleResumeSnooze();
+						break;
+					case "startLocalServer":
+						if (localServer) {
+							try {
+								await localServer.startServer();
+								vscode.window.showInformationMessage(
+									"Sweep local server started.",
+								);
+							} catch (error) {
+								vscode.window.showErrorMessage(
+									`Failed to start local server: ${(error as Error).message}`,
+								);
+							}
+						} else {
+							vscode.window.showWarningMessage(
+								"Local server is not available.",
+							);
+						}
 						break;
 				}
 			}
@@ -172,21 +157,6 @@ export function registerStatusBarCommands(
 
 			vscode.window.showInformationMessage(
 				`Sweep autocomplete ${!current ? "enabled" : "disabled"}`,
-			);
-		}),
-	);
-
-	disposables.push(
-		vscode.commands.registerCommand("sweep.togglePrivacyMode", async () => {
-			const inspection = config.inspect<boolean>("privacyMode");
-			const current =
-				inspection?.workspaceValue ??
-				inspection?.globalValue ??
-				inspection?.defaultValue ??
-				false;
-			await config.setPrivacyMode(!current);
-			vscode.window.showInformationMessage(
-				`Privacy mode ${!current ? "enabled" : "disabled"}`,
 			);
 		}),
 	);

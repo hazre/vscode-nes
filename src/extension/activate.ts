@@ -1,7 +1,6 @@
 import * as vscode from "vscode";
 
 import { ApiClient } from "~/api/client.ts";
-import { config } from "~/core/config";
 import { InlineEditProvider } from "~/editor/inline-edit-provider.ts";
 import { JumpEditManager } from "~/editor/jump-edit-manager.ts";
 import {
@@ -12,28 +11,27 @@ import {
 	registerStatusBarCommands,
 	SweepStatusBar,
 } from "~/extension/status-bar.ts";
+import { LocalAutocompleteServer } from "~/services/local-server.ts";
 import {
 	type AutocompleteMetricsPayload,
 	AutocompleteMetricsTracker,
 } from "~/telemetry/autocomplete-metrics.ts";
 import { DocumentTracker } from "~/telemetry/document-tracker.ts";
 
-const API_KEY_PROMPT_SHOWN = "sweep.apiKeyPromptShown";
-
 let tracker: DocumentTracker;
 let jumpEditManager: JumpEditManager;
 let provider: InlineEditProvider;
 let statusBar: SweepStatusBar;
 let metricsTracker: AutocompleteMetricsTracker;
+let localServer: LocalAutocompleteServer;
 
 export function activate(context: vscode.ExtensionContext) {
-	promptForApiKeyIfNeeded(context);
-
 	initSyntaxHighlighter();
 
 	tracker = new DocumentTracker();
-	const apiClient = new ApiClient();
-	metricsTracker = new AutocompleteMetricsTracker(apiClient);
+	localServer = new LocalAutocompleteServer();
+	const apiClient = new ApiClient(localServer);
+	metricsTracker = new AutocompleteMetricsTracker();
 	jumpEditManager = new JumpEditManager(metricsTracker);
 	provider = new InlineEditProvider(
 		tracker,
@@ -59,11 +57,6 @@ export function activate(context: vscode.ExtensionContext) {
 		},
 	);
 
-	const setApiKeyCommand = vscode.commands.registerCommand(
-		"sweep.setApiKey",
-		promptSetApiKey,
-	);
-
 	const acceptJumpEditCommand = vscode.commands.registerCommand(
 		"sweep.acceptJumpEdit",
 		() => jumpEditManager.acceptJumpEdit(),
@@ -71,9 +64,19 @@ export function activate(context: vscode.ExtensionContext) {
 
 	const acceptInlineEditCommand = vscode.commands.registerCommand(
 		"sweep.acceptInlineEdit",
-		(payload: AutocompleteMetricsPayload | undefined) => {
+		(
+			payload: AutocompleteMetricsPayload | undefined,
+			acceptedSuggestion:
+				| {
+						id: string;
+						startIndex: number;
+						endIndex: number;
+						completion: string;
+				  }
+				| undefined,
+		) => {
 			if (!payload) return;
-			provider.handleInlineAccept(payload);
+			provider.handleInlineAccept(payload, acceptedSuggestion);
 			metricsTracker.trackAccepted(payload);
 		},
 	);
@@ -84,7 +87,7 @@ export function activate(context: vscode.ExtensionContext) {
 	);
 
 	statusBar = new SweepStatusBar(context);
-	const statusBarCommands = registerStatusBarCommands(context);
+	const statusBarCommands = registerStatusBarCommands(context, localServer);
 
 	const changeListener = vscode.workspace.onDidChangeTextDocument((event) => {
 		if (event.document === vscode.window.activeTextEditor?.document) {
@@ -145,7 +148,6 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(
 		providerDisposable,
 		triggerCommand,
-		setApiKeyCommand,
 		acceptJumpEditCommand,
 		acceptInlineEditCommand,
 		dismissJumpEditCommand,
@@ -158,48 +160,14 @@ export function activate(context: vscode.ExtensionContext) {
 		jumpEditManager,
 		metricsTracker,
 		statusBar,
+		localServer,
 		...statusBarCommands,
 	);
+
+	// Always auto-start the local server
+	localServer.ensureServerRunning().catch((error) => {
+		console.error("[Sweep] Failed to auto-start local server:", error);
+	});
 }
 
 export function deactivate() {}
-
-async function promptForApiKeyIfNeeded(
-	context: vscode.ExtensionContext,
-): Promise<void> {
-	const apiKey = config.apiKey;
-
-	if (apiKey) return;
-
-	const hasPrompted = context.globalState.get<boolean>(
-		API_KEY_PROMPT_SHOWN,
-		false,
-	);
-	if (hasPrompted) return;
-
-	await promptSetApiKey();
-
-	await context.globalState.update(API_KEY_PROMPT_SHOWN, true);
-}
-
-async function promptSetApiKey(): Promise<void> {
-	const currentKey = config.apiKey ?? "";
-
-	if (!currentKey) {
-		vscode.env.openExternal(vscode.Uri.parse("https://app.sweep.dev/"));
-	}
-
-	const result = await vscode.window.showInputBox({
-		prompt: "Enter your Sweep API key",
-		placeHolder: currentKey ? `${currentKey.slice(0, 6)}...` : "sk-...",
-		ignoreFocusOut: true,
-		password: true,
-	});
-
-	if (result !== undefined) {
-		await config.setApiKey(result, vscode.ConfigurationTarget.Global);
-		vscode.window.showInformationMessage(
-			result ? "Sweep API key saved!" : "Sweep API key cleared.",
-		);
-	}
-}

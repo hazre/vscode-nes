@@ -15,10 +15,21 @@ export const UserActionSchema = z.object({
 		"DELETE_CHAR",
 		"INSERT_SELECTION",
 		"DELETE_SELECTION",
+		"UNDO",
+		"REDO",
 	]),
 	line_number: z.number(),
 	offset: z.number(),
 	file_path: z.string(),
+	timestamp: z.number(),
+});
+
+export const EditorDiagnosticSchema = z.object({
+	line: z.number(),
+	start_offset: z.number(),
+	end_offset: z.number(),
+	severity: z.string(),
+	message: z.string(),
 	timestamp: z.number(),
 });
 
@@ -35,9 +46,9 @@ export const AutocompleteRequestSchema = z.object({
 	multiple_suggestions: z.boolean(),
 	file_chunks: z.array(FileChunkSchema),
 	retrieval_chunks: z.array(FileChunkSchema),
+	editor_diagnostics: z.array(EditorDiagnosticSchema),
 	recent_user_actions: z.array(UserActionSchema),
 	use_bytes: z.boolean(),
-	privacy_mode_enabled: z.boolean(),
 });
 
 export const AutocompleteResponseSchema = z.object({
@@ -48,9 +59,25 @@ export const AutocompleteResponseSchema = z.object({
 	confidence: z.number(),
 	elapsed_time_ms: z.number().optional(),
 	finish_reason: z.string().nullable().optional(),
+	completions: z
+		.array(
+			z.object({
+				autocomplete_id: z.string(),
+				start_index: z.number(),
+				end_index: z.number(),
+				completion: z.string(),
+				confidence: z.number(),
+			}),
+		)
+		.optional(),
 });
 
-export const SuggestionTypeSchema = z.enum(["GHOST_TEXT", "POPUP"]);
+export const SuggestionTypeSchema = z.enum([
+	"GHOST_TEXT",
+	"POPUP",
+	"JUMP_TO_EDIT",
+	"MULTI",
+]);
 
 export const AutocompleteEventTypeSchema = z.enum([
 	"autocomplete_suggestion_shown",
@@ -75,13 +102,13 @@ export const AutocompleteMetricsRequestSchema = z.object({
 	lifespan: z.number().optional(),
 	debug_info: z.string(),
 	device_id: z.string(),
-	privacy_mode_enabled: z.boolean(),
 	num_definitions_retrieved: z.number().optional(),
 	num_usages_retrieved: z.number().optional(),
 });
 
 export type FileChunk = z.infer<typeof FileChunkSchema>;
 export type UserAction = z.infer<typeof UserActionSchema>;
+export type EditorDiagnostic = z.infer<typeof EditorDiagnosticSchema>;
 export type AutocompleteRequest = z.infer<typeof AutocompleteRequestSchema>;
 export type AutocompleteResponse = z.infer<typeof AutocompleteResponseSchema>;
 export type AutocompleteMetricsRequest = z.infer<

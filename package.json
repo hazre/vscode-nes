@@ -2,7 +2,7 @@
 	"name": "sweep-nes",
 	"displayName": "Sweep Next Edit",
 	"description": "Next Edit Autocomplete using Sweep Model",
-	"version": "0.3.7",
+	"version": "0.5.0",
 	"publisher": "SweepAI",
 	"repository": {
 		"type": "git",
@@ -36,14 +36,6 @@
 				"title": "Sweep: Trigger Next Edit Suggestion"
 			},
 			{
-				"command": "sweep.setApiKey",
-				"title": "Sweep: Set API Key"
-			},
-			{
-				"command": "sweep.togglePrivacyMode",
-				"title": "Sweep: Toggle Privacy Mode"
-			},
-			{
 				"command": "sweep.toggleEnabled",
 				"title": "Sweep: Toggle Enabled"
 			},
@@ -71,29 +63,44 @@
 				"when": "editorTextFocus && sweep.hasJumpEdit && !editorHasSelection && !inlineSuggestionVisible && !suggestWidgetVisible"
 			},
 			{
+				"command": "sweep.acceptJumpEdit",
+				"key": "alt+tab",
+				"when": "editorTextFocus && sweep.hasJumpEdit && !editorHasSelection"
+			},
+			{
+				"command": "sweep.acceptJumpEdit",
+				"key": "alt+l",
+				"when": "isLinux && editorTextFocus && sweep.hasJumpEdit && !editorHasSelection"
+			},
+			{
 				"command": "sweep.dismissJumpEdit",
 				"key": "escape",
 				"when": "editorTextFocus && sweep.hasJumpEdit"
+			},
+			{
+				"command": "editor.action.inlineSuggest.commit",
+				"key": "alt+tab",
+				"when": "editorTextFocus && inlineSuggestionVisible && suggestWidgetVisible && !editorHasSelection && !sweep.hasJumpEdit && !inSnippetMode"
+			},
+			{
+				"command": "editor.action.inlineSuggest.commit",
+				"key": "alt+l",
+				"when": "isLinux && editorTextFocus && inlineSuggestionVisible && suggestWidgetVisible && !editorHasSelection && !sweep.hasJumpEdit && !inSnippetMode"
+			},
+			{
+				"command": "editor.action.inlineSuggest.hide",
+				"key": "escape",
+				"when": "editorTextFocus && inlineSuggestionVisible && !suggestWidgetVisible && !sweep.hasJumpEdit"
 			}
 		],
 		"configuration": {
 			"title": "Sweep Next Edit",
 			"properties": {
-				"sweep.apiKey": {
-					"type": "string",
-					"default": "",
-					"description": "API key for authentication"
-				},
 				"sweep.enabled": {
 					"type": "boolean",
 					"default": true,
 					"scope": "window",
 					"description": "Enable or disable Sweep Next Edit suggestions"
-				},
-				"sweep.privacyMode": {
-					"type": "boolean",
-					"default": false,
-					"description": "When enabled completions will not be trained on"
 				},
 				"sweep.maxContextFiles": {
 					"type": "number",
@@ -120,6 +127,11 @@
 					"type": "number",
 					"default": 0,
 					"description": "Unix timestamp (ms) until which autocomplete is snoozed (0 disables snooze)"
+				},
+				"sweep.localPort": {
+					"type": "number",
+					"default": 8081,
+					"description": "Port for the local autocomplete server"
 				}
 			}
 		}
